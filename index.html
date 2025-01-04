@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Видео с веб-камеры и отслеживание движения</title>
+    <style>
+      canvas {
+        display: block;
+        margin: 10px auto;
+        border: 2px solid black;
+      }
+      #motion-count {
+        text-align: center;
+        font-size: 1.5em;
+        margin-top: 20px;
+      }
+      #chart {
+        width: 80%;
+        height: 300px;
+        margin: 20px auto;
+      }
+      #controls {
+        text-align: center;
+        margin-top: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas-main"></canvas>
+    <div id="motion-count">Пиксели с движением: 0</div>
+    <canvas id="chart"></canvas>
+    <div id="controls">
+      <button id="start-stop">Начать запись</button>
+      <button id="download">Скачать таймлапс</button>
+    </div>
+
+    <script>
+      const canvasMain = document.getElementById("canvas-main");
+      const motionCountDiv = document.getElementById("motion-count");
+      const chartCanvas = document.getElementById("chart");
+      const startStopButton = document.getElementById("start-stop");
+      const downloadButton = document.getElementById("download");
+      const ctxMain = canvasMain.getContext("2d");
+      const chartCtx = chartCanvas.getContext("2d");
+
+      let delayTrigger = true;
+      let startX = 0,
+        startY = 0,
+        endX = 0,
+        endY = 0;
+      let isSelecting = false;
+      let selectedArea = null;
+
+      chartCanvas.width = 800;
+      chartCanvas.height = 300;
+      const motionHistory = [];
+      const maxHistoryLength = 50;
+
+      let isRecording = false;
+      let recordedFrames = [];
+      const frameRate = 5; // Частота кадров для записи
+
+      // Получение видео с веб-камеры
+      async function startVideo() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+          });
+          const video = document.createElement("video");
+          video.srcObject = stream;
+          video.play();
+
+          video.addEventListener("loadedmetadata", () => {
+            canvasMain.width = video.videoWidth;
+            canvasMain.height = video.videoHeight;
+            drawFrame(video);
+          });
+        } catch (err) {
+          console.error("Ошибка доступа к камере:", err);
+        }
+      }
+
+      // Рисование видео на основном канвасе
+      function drawFrame(video) {
+        ctxMain.drawImage(video, 0, 0, canvasMain.width, canvasMain.height);
+
+        // Если область выделена, нарисовать прямоугольник
+        if (isSelecting || (startX && startY && endX && endY)) {
+          ctxMain.strokeStyle = "red";
+          ctxMain.lineWidth = 2;
+          ctxMain.strokeRect(startX, startY, endX - startX, endY - startY);
+        }
+
+        // Если область задана, обрабатывать движение
+        if (selectedArea) {
+          processMotion();
+        }
+
+        requestAnimationFrame(() => drawFrame(video));
+      }
+
+      // Обработчики мыши для выбора области
+      canvasMain.addEventListener("mousedown", (e) => {
+        const rect = canvasMain.getBoundingClientRect();
+        startX = e.clientX - rect.left;
+        startY = e.clientY - rect.top;
+        isSelecting = true;
+      });
+
+      canvasMain.addEventListener("mousemove", (e) => {
+        if (!isSelecting) return;
+        const rect = canvasMain.getBoundingClientRect();
+        endX = e.clientX - rect.left;
+        endY = e.clientY - rect.top;
+      });
+
+      canvasMain.addEventListener("mouseup", () => {
+        isSelecting = false;
+        selectedArea = {
+          x: Math.min(startX, endX),
+          y: Math.min(startY, endY),
+          width: Math.abs(endX - startX),
+          height: Math.abs(endY - startY),
+        };
+
+        console.log("Выбранная область:", selectedArea);
+      });
+
+      // Обработка движения в выбранной области
+      let lastFrame = null;
+      let frameCounter = 0;
+
+      function processMotion() {
+        const { x, y, width, height } = selectedArea;
+
+        // Выполняем обработку раз в 15 кадров
+        frameCounter++;
+        if (frameCounter % 5 !== 0) return;
+
+        const currentFrame = ctxMain.getImageData(x, y, width, height);
+        let motionPixelCount = 0;
+
+        if (lastFrame) {
+          for (let i = 0; i < currentFrame.data.length; i += 4) {
+            const rDiff = Math.abs(currentFrame.data[i] - lastFrame.data[i]);
+            const gDiff = Math.abs(
+              currentFrame.data[i + 1] - lastFrame.data[i + 1]
+            );
+            const bDiff = Math.abs(
+              currentFrame.data[i + 2] - lastFrame.data[i + 2]
+            );
+
+            // Грубое сравнение для контрастных объектов
+            const maxDiff = Math.max(rDiff, gDiff, bDiff);
+
+            if (maxDiff > 150) {
+              motionPixelCount++;
+            }
+          }
+        }
+
+        motionHistory.push(motionPixelCount);
+        if (motionHistory.length > maxHistoryLength) {
+          motionHistory.shift();
+        }
+
+        drawChart();
+        motionCountDiv.textContent = `Пиксели с движением: ${motionPixelCount}`;
+
+        // Если запись включена и превышен порог, сохраняем кадр
+        if (isRecording && motionPixelCount > 30 && delayTrigger) {
+          delayTrigger = false;
+          setTimeout(() => {
+            delayTrigger = true;
+          }, 2000);
+          setTimeout(() => {
+            recordedFrames.push(
+              ctxMain.getImageData(0, 0, canvasMain.width, canvasMain.height)
+            );
+          }, 300);
+        }
+
+        lastFrame = currentFrame;
+      }
+
+      function drawChart() {
+        chartCtx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
+        chartCtx.beginPath();
+        chartCtx.moveTo(0, chartCanvas.height - motionHistory[0]);
+
+        for (let i = 1; i < motionHistory.length; i++) {
+          const x = (chartCanvas.width / maxHistoryLength) * i;
+          const y = chartCanvas.height - motionHistory[i];
+          chartCtx.lineTo(x, y);
+        }
+
+        chartCtx.strokeStyle = "blue";
+        chartCtx.lineWidth = 2;
+        chartCtx.stroke();
+      }
+
+      function exportTimelapse() {
+        const canvasBuffer = document.createElement("canvas");
+        const ctxBuffer = canvasBuffer.getContext("2d");
+        canvasBuffer.width = canvasMain.width;
+        canvasBuffer.height = canvasMain.height;
+
+        const stream = canvasBuffer.captureStream(frameRate);
+        const mediaRecorder = new MediaRecorder(stream, {
+          mimeType: "video/webm",
+        });
+
+        const chunks = [];
+        mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+        mediaRecorder.onstop = () => {
+          const blob = new Blob(chunks, { type: "video/webm" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "timelapse.webm";
+          a.click();
+        };
+
+        mediaRecorder.start();
+
+        recordedFrames.forEach((frame, index) => {
+          setTimeout(() => {
+            ctxBuffer.putImageData(frame, 0, 0);
+          }, index * (1000 / frameRate));
+        });
+
+        setTimeout(
+          () => mediaRecorder.stop(),
+          recordedFrames.length * (1000 / frameRate)
+        );
+      }
+
+      startStopButton.addEventListener("click", () => {
+        isRecording = !isRecording;
+        startStopButton.textContent = isRecording
+          ? "Остановить запись"
+          : "Начать запись";
+
+        if (!isRecording && recordedFrames.length) {
+          downloadButton.disabled = false;
+        }
+      });
+
+      downloadButton.addEventListener("click", exportTimelapse);
+
+      startVideo();
+    </script>
+  </body>
+</html>
